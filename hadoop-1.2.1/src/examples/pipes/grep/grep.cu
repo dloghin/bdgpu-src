@@ -163,6 +163,49 @@ lbl_init_error:
 	}
 
 	/**
+	 * Initialize CUDA buffers in Unified Memory.
+	 */
+	int initializeCudaUnified() {
+		// for error checking
+		int src_line;
+		cudaError_t rc;
+
+#ifdef F_GPU_DEBUG
+		print_info();
+#endif
+
+		cthreads = MaxCudaThreads;
+		ccurr = 0;
+
+		// lines
+		src_line = __LINE__;
+		rc = cudaMallocManaged((void **)&c_lines, cthreads * MaxLine * sizeof(char));
+		if (rc != cudaSuccess)
+			goto lbl_init_unified_error;
+
+		// regexp
+		src_line = __LINE__;
+		rc = cudaMallocManaged((void **)&c_exp, MaxRegex * sizeof(char));
+		if (rc != cudaSuccess)
+			goto lbl_init_unified_error;
+
+		// results
+		src_line = __LINE__;
+		rc = cudaMallocManaged((void **)&c_res, cthreads * sizeof(int));
+		if (rc != cudaSuccess)
+			goto lbl_init_unified_error;
+
+		// copy the regexp
+		memcpy(c_exp, exp.c_str(), exp.size() + 1);
+
+		return 0;
+
+lbl_init_unified_error:
+		cout << "Map Initialize Unified Mem CUDA error |" << cudaGetErrorString(cudaGetLastError()) << "| at line " << src_line << endl;
+		return -1;
+	}
+
+	/**
 	 * Destroy CUDA buffers.
 	 */
 	void finishCuda() {
@@ -232,6 +275,38 @@ lbl_launch_err:
 	}
 
 	/**
+	 * Launch CUDA kernel in Unified Memory.
+	 */
+	cudaError_t launchCudaUnified(HadoopPipes::TaskContext* context, int threads) {
+		double t0, t1;
+		int i, src_line;
+		cudaError_t rc;
+
+#ifdef F_PROFILE
+		t0 = get_time();
+#endif
+		cuda_map<<<MaxCudaBlocks, MaxCudaThreadsBlock>>>(threads, c_lines, c_exp, c_res);
+		cudaDeviceSynchronize();
+#ifdef F_PROFILE
+		t1 = get_time();
+		cout << "CUDA kernel <" << threads << "> : " << cudaGetErrorString(cudaGetLastError()) << " took " << (t1-t0) << " seconds" << endl;
+#endif
+
+		// emit the results
+		for (i = 0; i < threads; i++) {
+			if (c_res[i] == 1) {
+				context->emit(exp, "1");
+			}
+		}
+
+		return cudaSuccess;
+
+lbl_launch_unified_err:
+		cout << "Launch Unified CUDA error " << cudaGetErrorString(cudaGetLastError()) << " at line " << src_line << endl;
+		return rc;
+	}
+
+	/**
 	 * Pipes map().
 	 */
 	void map(HadoopPipes::MapContext& context) {
@@ -243,7 +318,11 @@ lbl_launch_err:
 		// buffer current line
 		line = context.getInputValue();
 		len = line.length();
+#ifdef F_UNIFIED_MEM
+		memcpy(c_lines + (ccurr * MaxLine), (char*)line.c_str(), len + 1);
+#else
 		memcpy(h_lines + (ccurr * MaxLine), (char*)line.c_str(), len + 1);
+#endif
 
 		// if we reached the threshold, we launch CUDA kernel
 		ccurr++;
@@ -252,7 +331,11 @@ lbl_launch_err:
 		}
 		ccurr = 0;
 
+#ifdef F_UNIFIED_MEM
+		rc = launchCudaUnified(mapContext, cthreads);
+#else
 		rc = launchCuda(mapContext, cthreads);
+#endif
 		if (rc != cudaSuccess)
 			cout << "Map CUDA error |" << cudaGetErrorString(rc) << endl;
 	}
@@ -267,7 +350,11 @@ lbl_launch_err:
 #ifdef F_GPU_DEBUG
 		cout << "Launching the last chunk with " << ccurr << endl;
 #endif
+#ifdef F_UNIFIED_MEM
+		rc = launchCudaUnified(mapContext, ccurr);
+#else
 		rc = launchCuda(mapContext, ccurr);
+#endif
 		if (rc != cudaSuccess)
 			cout << "Launch CUDA error " << cudaGetErrorString(rc) << endl;
 	}
@@ -292,8 +379,11 @@ lbl_launch_err:
 #endif
 		}
 #endif	/* F_LOCAL_DEBUG */
-
+#ifdef F_UNIFIED_MEM
+		initializeCudaUnified();
+#else
 		initializeCuda();
+#endif
 	}
 
 	~GrepMapper() {

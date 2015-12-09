@@ -113,9 +113,18 @@ for hst in $HOSTS ; do
     ssh $hst$DOMAIN "$DSTAT_CMD --output $tmpdir/dstat.$hst.log > /dev/null" &
 done
 
+# start perf
+if ! [ -z $PERF_CMD ]; then
+	for hst in $HOSTS ; do
+		ssh $hst$DOMAIN "$JAVADIR/bin/jps | grep TaskTracker | cut -d ' ' -f 1 > $tmpdir/ttpid.txt"
+		sleep 1
+		ssh $hst$DOMAIN "perf stat -p \`cat $tmpdir/ttpid.txt\` 2> $tmpdir/perf.tasktracker.$hst.log > /dev/null &"
+	done
+fi
+
 # measure power
 if ! [ -z "$READ_POWER_CMD" ]; then
-	$READ_POWER_CMD | tee -a "$logdir/power.log" > /dev/null &
+        $READ_POWER_CMD | tee -a "$logdir/power.log" > /dev/null &
 fi
 
 # *** job execution
@@ -133,6 +142,13 @@ if ! [ -z "$READ_POWER_APP" ]; then
 	killall -SIGINT $READ_POWER_APP
 fi
 
+# kill perf
+if ! [ -z $PERF_CMD ]; then
+	for hst in $HOSTS ; do
+		ssh $hst$DOMAIN "killall -SIGINT perf"
+	done
+fi
+
 # kill remote dstats
 for hst in $HOSTS ; do
 	ssh $hst$DOMAIN "killall -9 dstat" 
@@ -142,9 +158,11 @@ done
 # get output
 if [ -z $HMASTER ]; then
 	$HBIN dfs -copyToLocal $OUTDIR $logdir/output
+	$HBIN dfs -rmr $OUTDIR
 else
 	ssh $HMASTER$DOMAIN "$HBIN dfs -copyToLocal $OUTDIR $tmpdir/output"
 	scp -r $HMASTER$DOMAIN:$tmpdir/output $logdir/
+	ssh $HMASTER$DOMAIN "$HBIN dfs -rmr OUTDIR"
 fi
 
 # get master log
@@ -162,6 +180,7 @@ fi
 
 for hst in $HOSTS ; do
     scp $hst$DOMAIN:$tmpdir/dstat.$hst.log $logdir/
+    scp $hst$DOMAIN:$tmpdir/perf.tasktracker.$hst.log $logdir/
     scp $hst$DOMAIN:$HDIR/logs/*-tasktracker-*log $logdir/
     scp $hst$DOMAIN:$HDIR/logs/*-jobtracker-*log $logdir/
     scp $hst$DOMAIN:$HDIR/logs/*-datanode-*log $logdir/

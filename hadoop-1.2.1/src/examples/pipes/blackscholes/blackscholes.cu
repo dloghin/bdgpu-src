@@ -313,6 +313,10 @@ public:
 	char* h_keys;
 	fptype* h_res;
 
+#ifdef F_PROFILE
+	double tKernel;
+#endif
+
 	/**
 	 * Initialize CUDA buffers.
 	 */
@@ -368,6 +372,49 @@ public:
 
 lbl_init_error:
 		cout << "Map Initialize CUDA error |" << cudaGetErrorString(cudaGetLastError()) << "| at line " << src_line << endl;
+		return -1;
+	}
+
+	/**
+	 * Initialize CUDA buffers in Unified Memory.
+	 */
+	int initializeCudaUnified() {
+		// for error checking
+		int src_line;
+		cudaError_t rc;
+
+#ifdef F_GPU_DEBUG
+		print_info();
+#endif
+
+		cthreads = MaxCudaThreads;
+		ccurr = 0;
+
+		// lines
+		src_line = __LINE__;
+		rc = cudaMallocManaged((void **)&c_lines, cthreads * MaxLine * sizeof(char));
+		if (rc != cudaSuccess)
+			goto lbl_init_unified_error;
+
+		// keys
+		src_line = __LINE__;
+		rc = cudaMallocManaged((void **)&c_keys, cthreads * MaxKey * sizeof(char));
+		if (rc != cudaSuccess)
+			goto lbl_init_unified_error;
+
+		// results
+		src_line = __LINE__;
+		rc = cudaMallocManaged((void **)&c_res, cthreads * sizeof(fptype));
+		if (rc != cudaSuccess)
+			goto lbl_init_unified_error;
+
+		h_lines = h_keys = NULL;
+		h_res = NULL;
+
+		return 0;
+
+lbl_init_unified_error:
+		cout << "Map Initialize Unified Mem CUDA error |" << cudaGetErrorString(cudaGetLastError()) << "| at line " << src_line << endl;
 		return -1;
 	}
 
@@ -450,6 +497,45 @@ lbl_launch_err:
 	}
 
 	/**
+	 * Launch CUDA kernel.
+	 */
+	cudaError_t launchCudaUnified(HadoopPipes::TaskContext* context, int threads) {
+		double t0, t1;
+		int i, src_line;
+		cudaError_t rc;
+		char result[16];
+
+		HadoopPipes::TaskContext::Counter* counter = context->getCounter(CounterGroup, EmitCounter);
+
+#ifdef F_PROFILE
+		t0 = get_time();
+#endif
+		cuda_map<<<MaxCudaBlocks, MaxCudaThreadsBlock>>>(threads, c_lines, c_keys, c_res);
+		rc = cudaDeviceSynchronize();
+		if (rc != cudaSuccess)
+                        goto lbl_launch_unified_err;
+#ifdef F_PROFILE
+		t1 = get_time();
+		// cout << "CUDA kernel <" << threads << "> : " << cudaGetErrorString(cudaGetLastError()) << " took " << (t1-t0) << " seconds" << endl;
+		tKernel += (t1-t0);
+#endif
+
+		// emit the results
+		for (i = 0; i < threads; i++) {
+			sprintf(result, "%.2lf", c_res[i]);
+			// sprintf(result, "%X", *(int*)&h_res[i]);
+			context->emit(string(c_keys + i * MaxKey), result);
+			context->incrementCounter(counter, 1);
+		}
+
+		return cudaSuccess;
+
+lbl_launch_unified_err:
+		cout << "Launch Unified Mem CUDA error " << cudaGetErrorString(cudaGetLastError()) << " at line " << src_line << endl;
+		return rc;
+	}
+
+	/**
 	 * Pipes map().
 	 */
 	void map(HadoopPipes::MapContext& context) {
@@ -461,7 +547,11 @@ lbl_launch_err:
 		// buffer current line
 		line = context.getInputValue();
 		len = line.length();
+#ifdef F_UNIFIED_MEM
+		memcpy(c_lines + (ccurr * MaxLine), (char*)line.c_str(), len);
+#else
 		memcpy(h_lines + (ccurr * MaxLine), (char*)line.c_str(), len);
+#endif
 
 		// if the threshold is reached, launch CUDA kernel
 		ccurr++;
@@ -470,7 +560,11 @@ lbl_launch_err:
 		}
 		ccurr = 0;
 
+#ifdef F_UNIFIED_MEM
+		rc = launchCudaUnified(mapContext, cthreads);
+#else
 		rc = launchCuda(mapContext, cthreads);
+#endif
 		if (rc != cudaSuccess)
 			cout << "Map CUDA error |" << cudaGetErrorString(rc) << endl;
 	}
@@ -485,20 +579,33 @@ lbl_launch_err:
 #ifdef F_GPU_DEBUG
 		cout << "Launching the last chunk with " << ccurr << endl;
 #endif
+#ifdef F_UNIFIED_MEM
+		rc = launchCudaUnified(mapContext, ccurr);
+#else
 		rc = launchCuda(mapContext, ccurr);
+#endif
 		if (rc != cudaSuccess)
 			cout << "Launch CUDA error " << cudaGetErrorString(rc) << endl;
 	}
 
 	BlackScholesMapper(HadoopPipes::TaskContext& context) {
 		mapContext = &context;
-
+#ifdef F_UNIFIED_MEM
+		initializeCudaUnified();
+#else
 		initializeCuda();
+#endif
+#ifdef F_PROFILE
+		tKernel = 0.0;
+#endif
 	}
 
 	~BlackScholesMapper() {
 #ifdef F_GPU_DEBUG
 		cout << "Cleaning map context" << endl;
+#endif
+#ifdef F_PROFILE
+		cout << "CUDA kernel total time " << tKernel << endl;
 #endif
 		finishCuda();
 	}
@@ -526,8 +633,11 @@ int main(int argc, char *argv[]) {
 #endif
 
 	//start the map/reduce job
+#ifdef F_UNIFIED_MEM
+	cout << "Using Unified Memory" << endl;
+#endif
 #ifdef F_PROFILE
-	cout << "Starting BlackScholes Pipes CUDA" << endl;
+	cout << "Starting BlackScholes Pipes CUDA with " << MaxCudaBlocks << " blocks and " << MaxCudaThreadsBlock << " threads per block" << endl;
 	double t0 = get_time();
 #endif
 	int res = HadoopPipes::runTask(HadoopPipes::TemplateFactory<BlackScholesMapper,BlackScholesReducer>());

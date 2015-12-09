@@ -77,7 +77,8 @@ public abstract class TaskStatus implements Writable, Cloneable {
     this.diagnosticInfo = diagnosticInfo;
     this.stateString = stateString;
     this.taskTracker = taskTracker;
-    this.phase = phase;
+    // this.phase = phase;
+    setAndLogPhase(phase);
     this.counters = counters;
     this.includeCounters = true;
   }
@@ -223,7 +224,8 @@ public abstract class TaskStatus implements Writable, Cloneable {
    */
   void setPhase(Phase phase){
     TaskStatus.Phase oldPhase = getPhase();
-    if (oldPhase != phase){
+    
+    if (oldPhase != phase){      
       // sort phase started
       if (phase == TaskStatus.Phase.SORT){
         setShuffleFinishTime(System.currentTimeMillis());
@@ -231,7 +233,15 @@ public abstract class TaskStatus implements Writable, Cloneable {
         setSortFinishTime(System.currentTimeMillis());
       }
     }
-    this.phase = phase; 
+    
+    // this.phase = phase;
+    setAndLogPhase(phase);
+  }
+  
+  private void setAndLogPhase(Phase phase) {
+	  Phase oldPhase = this.phase;
+	  LOG.info("Task " + taskid.toString() + " old phase " + oldPhase.toString() + " new phase " + phase.toString());
+	  this.phase = phase;
   }
 
   boolean inTaskCleanupPhase() {
@@ -330,7 +340,8 @@ public abstract class TaskStatus implements Writable, Cloneable {
       setFinishTime(status.getFinishTime()); 
     }
     
-    this.phase = status.getPhase();
+    // this.phase = status.getPhase();
+    setAndLogPhase(status.getPhase());
     this.counters = status.getCounters();
     this.outputSize = status.outputSize;
   }

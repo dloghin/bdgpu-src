@@ -61,7 +61,8 @@ endif
 endif
 
 NVCC=$(CUDA_DIR)/bin/nvcc -arch=$(CUDA_ARCH) -G -g 
-NVCOPT=-I$(HADOOP_DIR)/src/c++/install/include -I../common $(XFLAGS)
+
+NVCOPT=-I$(HADOOP_DIR)/src/c++/install/include -I../common -O3 --use_fast_math --compiler-options -O3,-marm,-mcpu=cortex-a15,-mtune=cortex-a15,-mfpu=vfpv3,-mfloat-abi=hard,-fstrict-aliasing $(XFLAGS)
 LDCUDA=-L$(CUDA_DIR)/$(CUDA_LIB) -lcudart
 
 all: $(PRG) $(PRG)-cu

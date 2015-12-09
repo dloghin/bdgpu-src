@@ -196,8 +196,11 @@ public:
 #ifdef FDEBUG
 		cout << "Using " << n_clusters << " clusters!" << endl;
 #endif
-
+#ifdef F_UNIFIED_MEM
+		initializeCudaUnified();
+#else
 		initializeCuda();
+#endif
 	}
 
 	/**
@@ -289,6 +292,56 @@ lbl_init_error:
 	}
 
 	/**
+	 * Initialize CUDA buffers in Unified Memory.
+	 */
+	int initializeCudaUnified() {
+		// for error checking
+		int src_line;
+		cudaError_t rc;
+
+#ifdef FDEBUG
+		print_info();
+#endif
+
+		cthreads = MaxCudaThreads;
+		ccurr = 0;
+
+		// lines
+		src_line = __LINE__;
+		rc = cudaMallocManaged((void **)&c_lines, cthreads * MaxLine * sizeof(char));
+		if (rc != cudaSuccess)
+			goto lbl_init_unified_error;
+		src_line = __LINE__;
+		rc = cudaMallocManaged((void **)&c_lens, cthreads * sizeof(int));
+		if (rc != cudaSuccess)
+			goto lbl_init_unified_error;
+
+		// clusters
+		src_line = __LINE__;
+		rc = cudaMallocManaged((void **)&c_clusters, n_clusters * sizeof(t_cluster));
+		if (rc != cudaSuccess)
+			goto lbl_init_unified_error;
+
+		// results
+		src_line = __LINE__;
+		rc = cudaMallocManaged((void **)&c_cid, MaxRes * sizeof(int));
+		if (rc != cudaSuccess)
+			goto lbl_init_unified_error;
+
+		h_lines = NULL;
+		h_lens = h_cid = NULL;
+
+		// store the clusters
+		memcpy(c_clusters, clusters, n_clusters * sizeof(t_cluster));
+
+		return 0;
+
+lbl_init_unified_error:
+		cout << "Map Initialize Unified Mem CUDA error |" << cudaGetErrorString(cudaGetLastError()) << "| at line " << src_line << endl;
+		return -1;
+	}
+
+	/**
 	 * Destroy CUDA buffers.
 	 */
 	void finishCuda() {
@@ -376,6 +429,53 @@ lbl_launch_err:
 	}
 
 	/**
+	 * Launch CUDA kernel in Unified Memory.
+	 */
+	cudaError_t launchCudaUnified(HadoopPipes::TaskContext* context, int threads) {
+		double t0, t1;
+		int i, src_line;
+		cudaError_t rc;
+
+		HadoopPipes::TaskContext::Counter* cudaCounter = context->getCounter(CounterGroup, CudaCounter);
+		HadoopPipes::TaskContext::Counter* counter = context->getCounter(CounterGroup, MapCounter);
+		context->incrementCounter(cudaCounter, 1);
+
+		// launch
+#ifdef FDEBUG
+		cout << "CUDA launch " << n_clusters << endl;
+#endif
+#ifdef F_PROFILE
+		t0 = get_time();
+#endif
+		cuda_map<<<MaxCudaBlocks, MaxCudaThreadsBlock>>>(n_clusters, dim, c_lines, c_lens, c_clusters, c_cid);
+		rc = cudaDeviceSynchronize();
+		if (rc != cudaSuccess)
+                        goto lbl_launch_unified_err;
+#ifdef F_PROFILE
+		t1 = get_time();
+		cout << "CUDA kernel <" << threads << "> : " << cudaGetErrorString(cudaGetLastError()) << " took " << (t1-t0) << " seconds" << endl;
+#endif
+
+		// emit the results
+		for (i = 0; i < threads; i++) {
+			if (c_cid[i] != -1) {
+				context->emit(HadoopUtils::toString(c_cid[i]), string(c_lines + (i * MaxLine)));
+				context->incrementCounter(counter, 1);
+			}
+#ifdef FDEBUG
+			else
+				cout << "Error cluster id outside bounds " << c_cid[i] << endl;
+#endif
+		}
+
+		return cudaSuccess;
+
+lbl_launch_unified_err:
+		cout << "Launch Unified CUDA error " << cudaGetErrorString(cudaGetLastError()) << " at line " << src_line << endl;
+		return rc;
+	}
+
+	/**
 	 * Pipes map().
 	 */
 	void map(HadoopPipes::MapContext& context) {
@@ -388,8 +488,13 @@ lbl_launch_err:
 
 		line = context.getInputValue();
 		len = line.length();
+#ifdef F_UNIFIED_MEM
+		memcpy(c_lines + (ccurr * MaxLine), (char*)line.c_str(), len);
+		memcpy(c_lens + ccurr, &len, sizeof(int));
+#else
 		memcpy(h_lines + (ccurr * MaxLine), (char*)line.c_str(), len);
 		memcpy(h_lens + ccurr, &len, sizeof(int));
+#endif
 
 		// if threshold is reached, launch CUDA kernel
 		ccurr++;
@@ -398,7 +503,11 @@ lbl_launch_err:
 		}
 		ccurr = 0;
 
+#ifdef F_UNIFIED_MEM
+		rc = launchCudaUnified(mapContext, cthreads);
+#else
 		rc = launchCuda(mapContext, cthreads);
+#endif
 		if (rc != cudaSuccess)
 			cout << "Map CUDA error |" << cudaGetErrorString(rc) << endl;
 	}
@@ -413,7 +522,11 @@ lbl_launch_err:
 #ifdef FDEBUG
 		cout << "Launching the last chunk with " << ccurr << endl;
 #endif
+#ifdef F_UNIFIED_MEM
+		rc = launchCudaUnified(mapContext, ccurr);
+#else
 		rc = launchCuda(mapContext, ccurr);
+#endif
 		if (rc != cudaSuccess)
 			cout << "Launch CUDA error " << cudaGetErrorString(rc) << endl;
 	}
@@ -495,8 +608,11 @@ int main(int argc, char** argv) {
 #endif
 
 	//start a map/reduce job
+#ifdef F_UNIFIED_MEM
+	cout << "Using Unified Memory" << endl;
+#endif
 #ifdef F_PROFILE
-	cout << "Starting Kmeans Pipes CUDA" << endl;
+	cout << "Starting Kmeans Pipes CUDA with " << MaxCudaBlocks << " blocks and " << MaxCudaThreadsBlock << " threads per block" << endl;
 	double t0 = get_time();
 #endif
 	int res = HadoopPipes::runTask(HadoopPipes::TemplateFactory<KmeansMapper, KmeansReducer>());
