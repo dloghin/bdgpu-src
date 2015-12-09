@@ -20,7 +20,7 @@ For more details, please visit:
 http://www.comp.nus.edu.sg/~dumitrel/bdgpu.html.
 
 
-* CODE LICENSE
+CODE LICENSE
 The code is licensed under the Apache License, Version 2.0 
 (see APACHE-LICENSE-2.0.txt or http://www.apache.org/licenses/LICENSE-2.0), 
 with the exception of: 
